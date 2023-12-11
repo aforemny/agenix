@@ -1,14 +1,13 @@
-{
-  config,
-  options,
-  lib,
-  pkgs,
-  ...
+{ config
+, options
+, lib
+, pkgs
+, ...
 }:
 with lib; let
   cfg = config.age;
 
-  isDarwin = lib.attrsets.hasAttrByPath ["environment" "darwinConfig"] options;
+  isDarwin = lib.attrsets.hasAttrByPath [ "environment" "darwinConfig" ] options;
 
   ageBin = config.age.ageBin;
 
@@ -61,43 +60,53 @@ with lib; let
     }
   '';
 
-  installSecret = secretType: ''
-    ${setTruePath secretType}
-    echo "decrypting '${secretType.file}' to '$_truePath'..."
-    TMP_FILE="$_truePath.tmp"
+  installSecretFn = ''
+    installSecret() {
+      symlink="$1"
+      name="$2"
+      path="$3"
+      file="$4"
+      mode="$5"
+      if "$symlink"; then
+        _truePath="${cfg.secretsMountPoint}/$_agenix_generation/$name"
+      else
+        _truePath="$path"
+      fi
+      echo "decrypting $file to '$_truePath'..."
+      TMP_FILE="$_truePath.tmp"
 
-    IDENTITIES=()
-    for identity in ${toString cfg.identityPaths}; do
-      test -r "$identity" || continue
-      test -s "$identity" || continue
-      IDENTITIES+=(-i)
-      IDENTITIES+=("$identity")
-    done
+      IDENTITIES=()
+      for identity in ${toString cfg.identityPaths}; do
+        test -r "$identity" || continue
+        test -s "$identity" || continue
+        IDENTITIES+=(-i)
+        IDENTITIES+=("$identity")
+      done
 
-    test "''${#IDENTITIES[@]}" -eq 0 && echo "[agenix] WARNING: no readable identities found!"
+      test "''${#IDENTITIES[@]}" -eq 0 && echo "[agenix] WARNING: no readable identities found!"
 
-    mkdir -p "$(dirname "$_truePath")"
-    [ "${secretType.path}" != "${cfg.secretsDir}/${secretType.name}" ] && mkdir -p "$(dirname "${secretType.path}")"
-    (
-      umask u=r,g=,o=
-      test -f "${secretType.file}" || echo '[agenix] WARNING: encrypted file ${secretType.file} does not exist!'
-      test -d "$(dirname "$TMP_FILE")" || echo "[agenix] WARNING: $(dirname "$TMP_FILE") does not exist!"
-      LANG=${config.i18n.defaultLocale or "C"} ${ageBin} --decrypt "''${IDENTITIES[@]}" -o "$TMP_FILE" "${secretType.file}"
-    )
-    chmod ${secretType.mode} "$TMP_FILE"
-    mv -f "$TMP_FILE" "$_truePath"
+      mkdir -p "$(dirname "$_truePath")"
+      [ "$path" != "${cfg.secretsDir}/$name" ] && mkdir -p "$(dirname "$path")"
+      (
+        umask u=r,g=,o=
+        test -f "$file" || echo '[agenix] WARNING: encrypted file '$file' does not exist!'
+        test -d "$(dirname "$TMP_FILE")" || echo "[agenix] WARNING: $(dirname "$TMP_FILE") does not exist!"
+        LANG=${config.i18n.defaultLocale or "C"} ${ageBin} --decrypt "''${IDENTITIES[@]}" -o "$TMP_FILE" "$file"
+      )
+      chmod "$mode" "$TMP_FILE"
+      mv -f "$TMP_FILE" "$_truePath"
 
-    ${optionalString secretType.symlink ''
-      [ "${secretType.path}" != "${cfg.secretsDir}/${secretType.name}" ] && ln -sfT "${cfg.secretsDir}/${secretType.name}" "${secretType.path}"
-    ''}
+      "$symlink" && ([ "$path" != "${cfg.secretsDir}/$name" ] && ln -sfn "${cfg.secretsDir}/$name" "$path")
+      true
+    }
   '';
 
   testIdentities =
     map
-    (path: ''
-      test -f ${path} || echo '[agenix] WARNING: config.age.identityPaths entry ${path} not present!'
-    '')
-    cfg.identityPaths;
+      (path: ''
+        test -f ${path} || echo '[agenix] WARNING: config.age.identityPaths entry ${path} not present!'
+      '')
+      cfg.identityPaths;
 
   cleanupAndLink = ''
     _agenix_generation="$(basename "$(readlink ${cfg.secretsDir})" || echo 0)"
@@ -111,12 +120,23 @@ with lib; let
     }
   '';
 
-  installSecrets = builtins.concatStringsSep "\n" (
-    ["echo '[agenix] decrypting secrets...'"]
-    ++ testIdentities
-    ++ (map installSecret (builtins.attrValues cfg.secrets))
-    ++ [cleanupAndLink]
-  );
+  installSecrets =
+    let
+      mkLine = secretType: ''
+        installSecret "${
+          if secretType.symlink
+          then "true"
+          else "false"
+        }" "${secretType.name}" "${secretType.path}" "${secretType.file}" "${secretType.mode}";
+      '';
+    in
+    builtins.concatStringsSep "\n" (
+      [ "echo '[agenix] decrypting secrets...'" ]
+      ++ testIdentities
+      ++ [ installSecretFn ]
+      ++ (map mkLine (builtins.attrValues cfg.secrets))
+      ++ [ cleanupAndLink ]
+    );
 
   chownSecret = secretType: ''
     ${setTruePath secretType}
@@ -124,12 +144,12 @@ with lib; let
   '';
 
   chownSecrets = builtins.concatStringsSep "\n" (
-    ["echo '[agenix] chowning...'"]
-    ++ [chownMountPoint]
+    [ "echo '[agenix] chowning...'" ]
+    ++ [ chownMountPoint ]
     ++ (map chownSecret (builtins.attrValues cfg.secrets))
   );
 
-  secretType = types.submodule ({config, ...}: {
+  secretType = types.submodule ({ config, ... }: {
     options = {
       name = mkOption {
         type = types.str;
@@ -179,12 +199,13 @@ with lib; let
           Group of the decrypted secret.
         '';
       };
-      symlink = mkEnableOption "symlinking secrets to their destination" // {default = true;};
+      symlink = mkEnableOption "symlinking secrets to their destination" // { default = true; };
     };
   });
-in {
+in
+{
   imports = [
-    (mkRenamedOptionModule ["age" "sshKeyPaths"] ["age" "identityPaths"])
+    (mkRenamedOptionModule [ "age" "sshKeyPaths" ] [ "age" "identityPaths" ])
   ];
 
   options.age = {
@@ -200,7 +221,7 @@ in {
     };
     secrets = mkOption {
       type = types.attrsOf secretType;
-      default = {};
+      default = { };
       description = ''
         Attrset of secrets.
       '';
@@ -215,11 +236,11 @@ in {
     secretsMountPoint = mkOption {
       type =
         types.addCheck types.str
-        (s:
-          (builtins.match "[ \t\n]*" s)
-          == null # non-empty
-          && (builtins.match ".+/" s) == null) # without trailing slash
-        // {description = "${types.str.description} (with check: non-empty without trailing slash)";};
+          (s:
+            (builtins.match "[ \t\n]*" s)
+            == null # non-empty
+            && (builtins.match ".+/" s) == null) # without trailing slash
+        // { description = "${types.str.description} (with check: non-empty without trailing slash)"; };
       default = "/run/agenix.d";
       description = ''
         Where secrets are created before they are symlinked to {option}`age.secretsDir`
@@ -235,7 +256,7 @@ in {
         ]
         else if (config.services.openssh.enable or false)
         then map (e: e.path) (lib.filter (e: e.type == "rsa" || e.type == "ed25519") config.services.openssh.hostKeys)
-        else [];
+        else [ ];
       defaultText = literalExpression ''
         if isDarwin
         then [
@@ -252,11 +273,11 @@ in {
     };
   };
 
-  config = mkIf (cfg.secrets != {}) (mkMerge [
+  config = mkIf (cfg.secrets != { }) (mkMerge [
     {
       assertions = [
         {
-          assertion = cfg.identityPaths != [];
+          assertion = cfg.identityPaths != [ ];
           message = "age.identityPaths must be set.";
         }
       ];
@@ -282,7 +303,7 @@ in {
       };
 
       # So user passwords can be encrypted.
-      system.activationScripts.users.deps = ["agenixInstall"];
+      system.activationScripts.users.deps = [ "agenixInstall" ];
 
       # Change ownership and group after users and groups are made.
       system.activationScripts.agenixChown = {
@@ -296,7 +317,7 @@ in {
       # So other activation scripts can depend on agenix being done.
       system.activationScripts.agenix = {
         text = "";
-        deps = ["agenixChown"];
+        deps = [ "agenixChown" ];
       };
     })
     (optionalAttrs isDarwin {
